@@ -2,6 +2,10 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 
+// ─── Logger (replaced by main.js via setLogger) ───────────────────────────────
+let _log = (msg) => console.log('[animepahe]', msg);
+function setLogger(fn) { _log = fn; }
+
 // API calls and page requests go to .pw (unified to prevent CF bypass mismatch)
 const API_BASE = 'https://animepahe.pw';
 const PAGE_BASE = 'https://animepahe.pw';
@@ -20,39 +24,44 @@ const COOKIE_TTL = 604800; // 7 days
 // FlareSolverr URL
 const FLARESOLVERR_URL = 'http://localhost:8191/v1';
 
+let _cacheFile = null;
+
+// Initialize with userData path
+function init(userDataPath) {
+  const path = require('path');
+  _cacheFile = path.join(userDataPath, 'cf_cookies.json');
+  loadCookieCache();
+}
+
 // Load cookies from cache file
 function loadCookieCache() {
+  if (!_cacheFile) return;
   try {
     const fs = require('fs');
-    const path = require('path');
-    const cacheFile = path.join(__dirname, 'cookies_cache.json');
-    if (fs.existsSync(cacheFile)) {
-      const data = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    if (fs.existsSync(_cacheFile)) {
+      const data = JSON.parse(fs.readFileSync(_cacheFile, 'utf8'));
       cookieCache = data.cookies || {};
       cookieTimestamps = data.timestamps || {};
     }
   } catch (e) {
-    console.error('Failed to load cookie cache:', e);
+    _log(`Failed to load cookie cache: ${e.message}`);
   }
 }
 
 // Save cookies to cache file
 function saveCookieCache() {
+  if (!_cacheFile) return;
   try {
     const fs = require('fs');
-    const path = require('path');
-    const cacheFile = path.join(__dirname, 'cookies_cache.json');
     const data = {
       cookies: cookieCache,
       timestamps: cookieTimestamps
     };
-    fs.writeFileSync(cacheFile, JSON.stringify(data), 'utf8');
+    fs.writeFileSync(_cacheFile, JSON.stringify(data), 'utf8');
   } catch (e) {
-    console.error('Failed to save cookie cache:', e);
+    _log(`Failed to save cookie cache: ${e.message}`);
   }
 }
-
-loadCookieCache();
 
 // Get cache key for URL
 function getCacheKey(url) {
@@ -210,34 +219,56 @@ async function solveCloudflare(url) {
 async function request(url, options = {}) {
   try {
     const response = await httpRequest(url, options);
-    if (response.status !== 403) {
+    if (response.status !== 403 && response.status !== 503) {
       return response;
     }
   } catch (e) {
-    // If request fails, try CF bypass
+    // If request fails due to socket error, fall through to CF bypass
   }
 
-  // Try CF bypass on 403
+  // Try CF bypass on 403/503
   const isRunning = await isFlareSolverrRunning();
   if (isRunning) {
-    console.log(`CF Challenge detected on ${url}. Solving with FlareSolverr...`);
+    _log(`CF challenge on ${url} — solving with FlareSolverr...`);
     try {
       const urlObj = new URL(url);
       const solveUrl = `${urlObj.protocol}//${urlObj.hostname}`;
       await solveCloudflare(solveUrl);
-      console.log('Bypass succeeded, retrying original request...');
+      _log('CF bypass succeeded, retrying...');
       return await httpRequest(url, options);
     } catch (e) {
-      console.error('FlareSolverr bypass failed:', e);
+      _log(`FlareSolverr bypass failed: ${e.message}`);
     }
   }
 
   throw new Error(`Request failed for ${url}`);
 }
 
+// Pre-emptive solve
+async function preEmptiveSolve() {
+  const domains = ['https://animepahe.pw', 'https://pahe.win'];
+  for (const url of domains) {
+    _log(`Pre-emptively solving CF for ${url}...`);
+    try {
+      await solveCloudflare(url);
+      _log(`Pre-emptive solve for ${url} successful.`);
+    } catch (e) {
+      _log(`Pre-emptive solve for ${url} failed: ${e.message}`);
+      throw e;
+    }
+  }
+}
+
+// Check if cookies are valid
+function hasValidCookies() {
+  // If we have animepahe cookies less than 7 days old, we consider it valid
+  const cached = getCachedCookies('https://animepahe.pw');
+  return Object.keys(cached).length > 0;
+}
+
 // Search anime
 async function searchAnime(query) {
-  console.log(`Searching for: ${query}`);
+  _log(`Searching for: ${query}`);
   const url = `${API_BASE}/api?m=search&q=${encodeURIComponent(query)}`;
   const response = await request(url);
   const data = response.json();
@@ -296,12 +327,12 @@ async function fetchMetadata(url, isSeries) {
         id: seriesId
       };
     } catch (e) {
-      console.error('API metadata failed, falling back to scraping:', e);
+      _log(`API metadata failed (${e.message}), falling back to scraping...`);
     }
   }
 
   // Scrape fallback
-  console.log('Fetching metadata via scraping...');
+  _log('Fetching metadata via scraping...');
   const response = await request(url);
   const text = response.text().replace(/\r\n/g, '').replace(/\n/g, '').replace(/\r/g, '');
 
@@ -413,7 +444,7 @@ async function fetchPaheWinLinks(playUrl, targetRes, audioLang) {
         }
       }
     } catch (e) {
-      console.error('Failed to parse JSON links:', e);
+      _log(`Failed to parse JSON links: ${e.message}`);
     }
   }
 
@@ -487,6 +518,10 @@ function unescapeHTML(str) {
 }
 
 module.exports = {
+  init,
+  hasValidCookies,
+  preEmptiveSolve,
+  setLogger,
   searchAnime,
   fetchAnimeInfo,
   fetchPoster,

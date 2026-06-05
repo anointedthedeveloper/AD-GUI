@@ -1,430 +1,269 @@
 // Home page JavaScript
+const { ipcRenderer } = require('electron');
+
 document.addEventListener('DOMContentLoaded', () => {
     // Load theme from localStorage
     const settings = JSON.parse(localStorage.getItem('settings') || '{}');
-    if (settings.theme === 'dark') {
-        document.body.classList.add('dark');
-    }
+    if (settings.theme === 'dark') document.body.classList.add('dark');
 
-    const searchInput = document.getElementById('search-input');
-    const searchBtn = document.getElementById('search-btn');
-    const urlInput = document.getElementById('url-input');
-    const pasteUrlBtn = document.getElementById('paste-url-btn');
-    const recentList = document.getElementById('recent-list');
-    const trendingGrid = document.getElementById('trending-grid');
-    const loader = document.getElementById('loader');
-    const animeDetailsSection = document.getElementById('anime-details-section');
-    const animeTitle = document.getElementById('anime-title');
-    const animeEpisodes = document.getElementById('anime-episodes');
-    const animeDescription = document.getElementById('anime-description');
-    const animePoster = document.getElementById('anime-poster');
-    const episodesContainer = document.getElementById('episodes-container');
-    const downloadAllBtn = document.getElementById('download-all');
-    const closeDetailsBtn = document.getElementById('close-details');
-    const qualityBtns = document.querySelectorAll('.quality-btn');
-    const clearHistoryBtn = document.getElementById('clear-history');
+    const searchInput       = document.getElementById('search-input');
+    const searchBtn         = document.getElementById('search-btn');
+    const urlInput          = document.getElementById('url-input');
+    const pasteUrlBtn       = document.getElementById('paste-url-btn');
+    const recentList        = document.getElementById('recent-list');
+    const trendingGrid      = document.getElementById('trending-grid');
+    const loader            = document.getElementById('loader');
+    const loaderMsg         = document.getElementById('loader-msg');
     const urlPreviewSection = document.getElementById('url-preview-section');
-    const previewContent = document.getElementById('preview-content');
-    const confirmUrlBtn = document.getElementById('confirm-url');
-    const cancelUrlBtn = document.getElementById('cancel-url');
+    const previewContent    = document.getElementById('preview-content');
+    const confirmUrlBtn     = document.getElementById('confirm-url');
+    const cancelUrlBtn      = document.getElementById('cancel-url');
+    const clearHistoryBtn   = document.getElementById('clear-history');
+    const fsBadge           = document.getElementById('fs-badge');
 
-    let selectedQuality = '720p';
-    let currentAnimeData = null;
-
-    // Show loader
-    function showLoader() {
+    // ── Loader ─────────────────────────────────────────────────────────────────
+    function showLoader(msg = 'Loading...') {
+        if (loaderMsg) loaderMsg.textContent = msg;
         loader.classList.add('active');
     }
+    function hideLoader() { loader.classList.remove('active'); }
 
-    // Hide loader
-    function hideLoader() {
-        loader.classList.remove('active');
-    }
+    // ── FlareSolverr status & UI blocking ─────────────────────────────────────
+    let isAppReady = false;
 
-    // Load recent searches from localStorage or API
-    function loadRecentSearches() {
-        showLoader();
-        const recentSearches = JSON.parse(localStorage.getItem('recentSearches') || '[]');
-        
-        recentList.innerHTML = '';
-        
-        if (recentSearches.length === 0) {
-            recentList.innerHTML = '<p style="color: var(--gray-400); font-size: 14px;">No recent searches</p>';
-        } else {
-            recentSearches.forEach((search, index) => {
-                const item = document.createElement('div');
-                item.className = 'recent-item fade-in';
-                item.innerHTML = `
-                    <span>${search}</span>
-                    <button class="delete-search-btn" data-index="${index}">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <line x1="18" y1="6" x2="6" y2="18"/>
-                            <line x1="6" y1="6" x2="18" y2="18"/>
-                        </svg>
-                    </button>
-                `;
-                
-                // Click on search to search
-                item.querySelector('span').addEventListener('click', () => {
-                    searchInput.value = search;
-                    performSearch(search);
-                });
-                
-                // Click on delete button to remove
-                item.querySelector('.delete-search-btn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    deleteRecentSearch(index);
-                });
-                
-                recentList.appendChild(item);
-            });
+    function setUiState(state) {
+        if (!fsBadge) return;
+        switch (state) {
+            case 'starting':
+                isAppReady = false;
+                fsBadge.textContent = '🟡 Starting CF Bypass...';
+                fsBadge.style.color = '#f59e0b';
+                searchInput.disabled = true; searchBtn.disabled = true;
+                urlInput.disabled = true; pasteUrlBtn.disabled = true;
+                break;
+            case 'solving':
+                isAppReady = false;
+                fsBadge.textContent = '🟠 Solving Cloudflare... (Takes ~1 min)';
+                fsBadge.style.color = '#f97316';
+                searchInput.disabled = true; searchBtn.disabled = true;
+                urlInput.disabled = true; pasteUrlBtn.disabled = true;
+                break;
+            case 'ready':
+                isAppReady = true;
+                fsBadge.textContent = '🟢 CF Bypassed (Valid 7 days)';
+                fsBadge.style.color = '#22c55e';
+                searchInput.disabled = false; searchBtn.disabled = false;
+                urlInput.disabled = false; pasteUrlBtn.disabled = false;
+                break;
+            case 'error':
+                isAppReady = false; // or allow fallback? fallback may fail if CF is strict
+                fsBadge.textContent = '🔴 CF Bypass Error';
+                fsBadge.style.color = '#ef4444';
+                searchInput.disabled = false; searchBtn.disabled = false;
+                urlInput.disabled = false; pasteUrlBtn.disabled = false;
+                break;
+            default:
+                // default to loading
+                isAppReady = false;
+                searchInput.disabled = true; searchBtn.disabled = true;
+                urlInput.disabled = true; pasteUrlBtn.disabled = true;
+                break;
         }
-        
-        hideLoader();
     }
 
-    // Delete individual recent search
-    function deleteRecentSearch(index) {
+    // Default locked state on boot
+    setUiState('starting');
+
+    ipcRenderer.on('flaresolverr-state', (e, state) => setUiState(state));
+
+    // ── Recent searches ─────────────────────────────────────────────────────────
+    function loadRecentSearches() {
         const recentSearches = JSON.parse(localStorage.getItem('recentSearches') || '[]');
-        recentSearches.splice(index, 1);
-        localStorage.setItem('recentSearches', JSON.stringify(recentSearches));
-        loadRecentSearches();
+        recentList.innerHTML = '';
+        if (recentSearches.length === 0) {
+            recentList.innerHTML = '<p style="color:var(--gray-400);font-size:14px;">No recent searches</p>';
+            return;
+        }
+        recentSearches.forEach((search, index) => {
+            const item = document.createElement('div');
+            item.className = 'recent-item fade-in';
+            item.innerHTML = `
+                <span>${search}</span>
+                <button class="delete-search-btn" data-index="${index}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            `;
+            item.querySelector('span').addEventListener('click', () => {
+                searchInput.value = search;
+                performSearch(search);
+            });
+            item.querySelector('.delete-search-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                const list = JSON.parse(localStorage.getItem('recentSearches') || '[]');
+                list.splice(index, 1);
+                localStorage.setItem('recentSearches', JSON.stringify(list));
+                loadRecentSearches();
+            });
+            recentList.appendChild(item);
+        });
     }
 
-    // Clear all search history
     function clearSearchHistory() {
-        if (!confirm('Are you sure you want to clear all search history?')) return;
+        if (!confirm('Clear all search history?')) return;
         localStorage.removeItem('recentSearches');
         loadRecentSearches();
     }
 
-    // Load trending anime from API
+    // ── Trending (placeholder — API has no trending endpoint) ──────────────────
     function loadTrendingAnime() {
-        showLoader();
-        // TODO: Replace with actual API call
-        const trendingAnime = []; // Will be populated from API
-        
-        trendingGrid.innerHTML = '';
-        
-        if (trendingAnime.length === 0) {
-            trendingGrid.innerHTML = '<p style="color: var(--gray-400); font-size: 14px; grid-column: 1/-1; text-align: center;">No trending anime available</p>';
-        } else {
-            trendingAnime.forEach(anime => {
-                const card = document.createElement('div');
-                card.className = 'trending-card fade-in';
-                card.innerHTML = `
-                    <div class="card-image">
-                        <div class="placeholder-image">${anime.initials || 'AN'}</div>
-                    </div>
-                    <div class="card-info">
-                        <h4>${anime.title}</h4>
-                        <p>${anime.episodes} Episodes</p>
-                    </div>
-                `;
-                card.addEventListener('click', () => {
-                    fetchAnimeDetails(anime.id);
-                });
-                trendingGrid.appendChild(card);
-            });
-        }
-        
-        hideLoader();
+        trendingGrid.innerHTML = '<p style="color:var(--gray-400);font-size:14px;grid-column:1/-1;text-align:center;">Search for anime to get started</p>';
     }
 
-    // Fetch anime details from API
-    async function fetchAnimeDetails(animeId) {
-        showLoader();
-        
-        try {
-            // TODO: Replace with actual API call
-            // const response = await fetch(`/api/anime/${animeId}`);
-            // currentAnimeData = await response.json();
-            
-            // Simulate API response
-            currentAnimeData = {
-                id: animeId,
-                title: 'Anime Title',
-                episodes: 0,
-                description: 'Anime description will be loaded from API.',
-                poster: '',
-                episodeList: []
-            };
-            
-            animeTitle.textContent = currentAnimeData.title;
-            animeEpisodes.textContent = `${currentAnimeData.episodes} Episodes`;
-            animeDescription.textContent = currentAnimeData.description;
-            
-            if (currentAnimeData.poster) {
-                animePoster.innerHTML = `<img src="${currentAnimeData.poster}" alt="${currentAnimeData.title}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 12px;">`;
-            }
-            
-            loadEpisodes();
-            animeDetailsSection.style.display = 'block';
-            animeDetailsSection.scrollIntoView({ behavior: 'smooth' });
-        } catch (error) {
-            console.error('Failed to fetch anime details:', error);
-            alert('Failed to load anime details. Please try again.');
-        }
-        
-        hideLoader();
-    }
-
-    // Load episodes
-    function loadEpisodes() {
-        episodesContainer.innerHTML = '';
-        
-        if (!currentAnimeData || currentAnimeData.episodeList.length === 0) {
-            episodesContainer.innerHTML = '<p style="color: var(--gray-400); font-size: 14px; text-align: center; padding: 32px;">No episodes available</p>';
-            return;
-        }
-        
-        currentAnimeData.episodeList.forEach(episode => {
-            const row = document.createElement('div');
-            row.className = 'episode-row fade-in';
-            row.innerHTML = `
-                <span>Episode ${episode.number}</span>
-                <button class="download-episode-btn" data-episode="${episode.number}">Download</button>
-            `;
-            
-            row.querySelector('.download-episode-btn').addEventListener('click', () => {
-                downloadEpisode(episode.number);
-            });
-            
-            episodesContainer.appendChild(row);
-        });
-    }
-
-    // Download single episode
-    async function downloadEpisode(episodeNumber) {
-        showLoader();
-        
-        try {
-            // Create anime folder
-            const animePath = await window.electron.ipcRenderer.invoke('create-anime-folder', currentAnimeData.title);
-            
-            // Add to download queue
-            const download = {
-                anime: currentAnimeData.title,
-                episode: episodeNumber,
-                quality: selectedQuality,
-                size: 'Calculating...',
-                progress: 0,
-                speed: '0 MB/s',
-                id: Date.now(),
-                animePath: animePath
-            };
-            
-            // Save to download queue
-            const downloads = JSON.parse(localStorage.getItem('downloads') || '[]');
-            downloads.push(download);
-            localStorage.setItem('downloads', JSON.stringify(downloads));
-            
-            // Start download via Electron
-            await window.electron.ipcRenderer.invoke('start-download', {
-                animeName: currentAnimeData.title,
-                episodeNumber: episodeNumber,
-                quality: selectedQuality,
-                animePath: animePath
-            });
-            
-            setTimeout(() => {
-                hideLoader();
-                alert(`Episode ${episodeNumber} added to download queue!`);
-            }, 500);
-        } catch (error) {
-            console.error('Failed to download episode:', error);
-            hideLoader();
-            alert('Failed to start download. Please try again.');
-        }
-    }
-
-    // Download all episodes
-    async function downloadAllEpisodes() {
-        if (!currentAnimeData || currentAnimeData.episodeList.length === 0) {
-            alert('No episodes to download.');
-            return;
-        }
-        
-        if (!confirm(`Are you sure you want to download all ${currentAnimeData.episodes} episodes in ${selectedQuality}?`)) {
-            return;
-        }
-        
-        showLoader();
-        
-        try {
-            // Create anime folder
-            const animePath = await window.electron.ipcRenderer.invoke('create-anime-folder', currentAnimeData.title);
-            
-            // Add all episodes to download queue
-            const downloads = JSON.parse(localStorage.getItem('downloads') || '[]');
-            currentAnimeData.episodeList.forEach(episode => {
-                downloads.push({
-                    anime: currentAnimeData.title,
-                    episode: episode.number,
-                    quality: selectedQuality,
-                    size: 'Calculating...',
-                    progress: 0,
-                    speed: '0 MB/s',
-                    id: Date.now() + episode.number,
-                    animePath: animePath
-                });
-            });
-            localStorage.setItem('downloads', JSON.stringify(downloads));
-            
-            // Start downloads via Electron
-            for (const episode of currentAnimeData.episodeList) {
-                await window.electron.ipcRenderer.invoke('start-download', {
-                    animeName: currentAnimeData.title,
-                    episodeNumber: episode.number,
-                    quality: selectedQuality,
-                    animePath: animePath
-                });
-            }
-            
-            setTimeout(() => {
-                hideLoader();
-                alert(`All episodes added to download queue!`);
-            }, 500);
-        } catch (error) {
-            console.error('Failed to download all episodes:', error);
-            hideLoader();
-            alert('Failed to start downloads. Please try again.');
-        }
-    }
-
-    // Perform search
+    // ── Search ──────────────────────────────────────────────────────────────────
     async function performSearch(query) {
-        if (!query.trim()) return;
-        
-        showLoader();
-        
-        // Save to recent searches
-        const recentSearches = JSON.parse(localStorage.getItem('recentSearches') || '[]');
-        if (!recentSearches.includes(query)) {
-            recentSearches.unshift(query);
-            if (recentSearches.length > 10) recentSearches.pop();
-            localStorage.setItem('recentSearches', JSON.stringify(recentSearches));
+        if (!isAppReady && fsBadge.textContent !== '🔴 CF Bypass Error') {
+            alert('Please wait for Cloudflare bypass to finish solving.');
+            return;
         }
-        
-        // Reload recent searches
+        if (!query.trim()) return;
+
+        // Save to recent searches
+        const recents = JSON.parse(localStorage.getItem('recentSearches') || '[]');
+        if (!recents.includes(query)) {
+            recents.unshift(query);
+            if (recents.length > 10) recents.pop();
+            localStorage.setItem('recentSearches', JSON.stringify(recents));
+        }
         loadRecentSearches();
-        
+
+        showLoader(`Searching for "${query}"...`);
+
         try {
-            const result = await window.electron.ipcRenderer.invoke('search-anime', query);
-            
+            const result = await ipcRenderer.invoke('search-anime', query);
             if (result.success && result.data.length > 0) {
-                // Store results in localStorage for results page
                 localStorage.setItem('searchResults', JSON.stringify(result.data));
                 localStorage.setItem('searchQuery', query);
-                
-                // Navigate to results page
                 window.location.href = `results.html?q=${encodeURIComponent(query)}`;
-            } else {
-                alert('No anime found. Please try a different search term.');
+            } else if (result.success) {
                 hideLoader();
+                alert('No anime found. Try a different search term.');
+            } else {
+                hideLoader();
+                alert(`Search failed: ${result.message}`);
             }
-        } catch (error) {
-            console.error('Failed to search anime:', error);
-            alert('Failed to search anime. Please try again.');
+        } catch (e) {
+            console.error('Search error:', e);
             hideLoader();
+            alert('Search failed. Please check your connection and try again.');
         }
     }
 
-    // Handle URL paste
+    // ── URL paste ───────────────────────────────────────────────────────────────
     async function handlePasteUrl() {
         try {
             const text = await navigator.clipboard.readText();
             urlInput.value = text;
-            
-            // Show URL preview
             showUrlPreview(text);
-        } catch (err) {
-            console.error('Failed to read clipboard:', err);
-            alert('Failed to paste from clipboard. Please paste manually.');
+        } catch (_) {
+            alert('Failed to read clipboard. Please paste manually.');
         }
     }
 
-    // Show URL preview
+    urlInput.addEventListener('input', () => {
+        const v = urlInput.value.trim();
+        if (v.startsWith('https://animepahe.')) showUrlPreview(v);
+        else urlPreviewSection.style.display = 'none';
+    });
+
     function showUrlPreview(url) {
+        const isValid = /animepahe\.(com|org|ru|si|pw)\/(anime|play)\//.test(url);
         previewContent.innerHTML = `
-            <div style="text-align: center;">
-                <p style="margin-bottom: 8px; font-weight: 500;">URL detected:</p>
-                <p style="word-break: break-all; color: var(--primary-blue);">${url}</p>
-                <p style="margin-top: 16px; font-size: 12px;">Click "Confirm & Load" to fetch anime details from this URL</p>
+            <div style="text-align:center;">
+                <p style="margin-bottom:8px;font-weight:500;">URL detected:</p>
+                <p style="word-break:break-all;color:var(--primary-blue);">${url}</p>
+                ${isValid
+                    ? '<p style="margin-top:12px;font-size:12px;color:#22c55e;">✔ Valid AnimePahe URL</p>'
+                    : '<p style="margin-top:12px;font-size:12px;color:#f59e0b;">⚠ This URL may not be a valid AnimePahe series URL</p>'
+                }
             </div>
         `;
         urlPreviewSection.style.display = 'block';
         urlPreviewSection.scrollIntoView({ behavior: 'smooth' });
     }
 
-    // Confirm URL and load anime
+    // ── Confirm URL — fetch real metadata and navigate ─────────────────────────
     async function confirmUrl() {
-        const url = urlInput.value;
+        if (!isAppReady && fsBadge.textContent !== '🔴 CF Bypass Error') {
+            alert('Please wait for Cloudflare bypass to finish solving.');
+            return;
+        }
+        const url = urlInput.value.trim();
         if (!url) return;
-        
+
         urlPreviewSection.style.display = 'none';
-        
-        // TODO: Parse URL and fetch anime details
-        console.log('Loading anime from URL:', url);
-        
-        showLoader();
-        setTimeout(() => {
-            currentAnimeData = {
-                id: 'url-result',
-                title: 'Anime from URL',
-                episodes: 0,
-                description: 'Anime description will be loaded from API.',
-                poster: '',
-                episodeList: []
-            };
-            
-            animeTitle.textContent = currentAnimeData.title;
-            animeEpisodes.textContent = `${currentAnimeData.episodes} Episodes`;
-            animeDescription.textContent = currentAnimeData.description;
-            
-            loadEpisodes();
-            animeDetailsSection.style.display = 'block';
-            animeDetailsSection.scrollIntoView({ behavior: 'smooth' });
+        showLoader('Fetching anime info from URL...');
+
+        try {
+            const isSeries = /\/anime\//.test(url);
+            const result   = await ipcRenderer.invoke('fetch-anime-metadata', url, isSeries);
+
+            if (!result.success) {
+                hideLoader();
+                alert(`Failed to load anime: ${result.message}`);
+                return;
+            }
+
+            const meta = result.data;
+
+            if (isSeries && meta.id) {
+                // Navigate to details page with the anime session id
+                localStorage.setItem('selectedAnime', JSON.stringify({
+                    id: meta.id || meta.session,
+                    title: meta.title,
+                    episodes: meta.episode_count,
+                    poster: meta.poster,
+                    session: meta.session,
+                    sourceUrl: url
+                }));
+                hideLoader();
+                window.location.href = `details.html?id=${encodeURIComponent(meta.id || meta.session)}&url=${encodeURIComponent(url)}`;
+            } else if (isSeries && meta.title) {
+                // Scraped fallback — no id, but we have the URL
+                localStorage.setItem('selectedAnime', JSON.stringify({
+                    title: meta.title,
+                    episodes: meta.episode_count,
+                    poster: meta.poster,
+                    sourceUrl: url
+                }));
+                hideLoader();
+                window.location.href = `details.html?url=${encodeURIComponent(url)}`;
+            } else {
+                hideLoader();
+                alert('Could not extract anime info from that URL. Make sure it is a valid AnimePahe series URL.');
+            }
+        } catch (e) {
+            console.error('confirmUrl error:', e);
             hideLoader();
-        }, 1000);
+            alert(`Error loading URL: ${e.message}`);
+        }
     }
 
-    // Cancel URL preview
     function cancelUrl() {
         urlPreviewSection.style.display = 'none';
         urlInput.value = '';
     }
 
-    // Quality selection
-    qualityBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            qualityBtns.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            selectedQuality = btn.dataset.quality;
-        });
-    });
-
-    // Event listeners
-    searchBtn.addEventListener('click', () => {
-        performSearch(searchInput.value);
-    });
-
-    searchInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            performSearch(searchInput.value);
-        }
-    });
-
+    // ── Event listeners ────────────────────────────────────────────────────────
+    searchBtn.addEventListener('click', () => performSearch(searchInput.value));
+    searchInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') performSearch(searchInput.value); });
     pasteUrlBtn.addEventListener('click', handlePasteUrl);
-    downloadAllBtn.addEventListener('click', downloadAllEpisodes);
-    closeDetailsBtn.addEventListener('click', () => {
-        animeDetailsSection.style.display = 'none';
-    });
-    clearHistoryBtn.addEventListener('click', clearSearchHistory);
+    clearHistoryBtn && clearHistoryBtn.addEventListener('click', clearSearchHistory);
     confirmUrlBtn.addEventListener('click', confirmUrl);
     cancelUrlBtn.addEventListener('click', cancelUrl);
 
-    // Initialize
+    // ── Init ───────────────────────────────────────────────────────────────────
     loadRecentSearches();
     loadTrendingAnime();
 });
