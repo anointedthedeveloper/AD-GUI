@@ -5,8 +5,7 @@ const os           = require('os');
 const http         = require('http');
 const { spawn }    = require('child_process');
 
-const animepahe  = require('./animepahe');
-const kwik       = require('./kwik');
+const animepahe  = require('./python_bridge');
 const downloader = require('./downloader');
 
 let mainWindow;
@@ -43,7 +42,6 @@ function setAppStatus(state) {
 
 // Expose loggers to modules
 animepahe.setLogger(appLog);
-kwik.setLogger(appLog);
 downloader.setLogger(appLog);
 
 // ─── Global error handlers ─────────────────────────────────────────────────────
@@ -64,65 +62,12 @@ function isFsRunning() {
 }
 
 async function startFlareSolverr() {
-  setAppStatus('starting');
+  // Python bridge handles FlareSolverr internally.
+  // We just check for cached cookies and call preEmptiveSolve if needed.
 
-  // Always start FlareSolverr — needed for on-demand re-solves on 403
-  // 1. Start FlareSolverr if not running
-  if (!await isFsRunning()) {
-    if (!fs.existsSync(FS_EXE)) {
-      appLog(`[FlareSolverr] exe not found at: ${FS_EXE}`);
-      setAppStatus('error');
-      return false;
-    }
-    appLog('[FlareSolverr] Starting bundled process...');
-    try {
-      const profileDir = path.join(app.getPath('userData'), 'browser_profile');
-      if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
-      _fsProc = spawn(
-        FS_EXE,
-        ['--max-timeout', '180000', '--browser-user-data-dir', profileDir],
-        {
-          cwd:         path.dirname(FS_EXE),
-          detached:    false,
-          windowsHide: true,
-          stdio:       ['ignore', 'pipe', 'pipe']
-        }
-      );
-      _fsProc.stdout.on('data', d => appLog(`[FlareSolverr stdout] ${d.toString().trim()}`));
-      _fsProc.stderr.on('data', d => appLog(`[FlareSolverr stderr] ${d.toString().trim()}`));
-      _fsProc.on('error', (e) => { appLog(`[FlareSolverr] Spawn error: ${e.message}`); setAppStatus('error'); });
-      _fsProc.on('exit',  (c) => { appLog(`[FlareSolverr] Exited (code ${c})`); _fsReady = false; });
-    } catch (e) {
-      appLog(`[FlareSolverr] Failed to spawn: ${e.message}`);
-      setAppStatus('error');
-      return false;
-    }
-  }
-
-  // 3. Wait for FlareSolverr to bind port 8191
-  appLog('[FlareSolverr] Waiting for :8191 to become ready (up to 60 s)...');
-  let ready = false;
-  for (let i = 0; i < 120; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    if (await isFsRunning()) {
-      ready = true;
-      break;
-    }
-    if (i > 0 && i % 20 === 0) appLog(`[FlareSolverr] Still waiting... (${(i * 0.5).toFixed(0)}s elapsed)`);
-  }
-
-  if (!ready) {
-    appLog('[FlareSolverr] Did not become ready in 60 s');
-    setAppStatus('error');
-    return false;
-  }
-
-  _fsReady = true;
-  appLog('[FlareSolverr] Ready on :8191 ✓');
-
-  // 4. Pre-emptive solve — skip if we already have valid cookies
   if (animepahe.hasValidCookies()) {
-    appLog('[FlareSolverr] Valid cached cookies found — skipping pre-emptive solve.');
+    appLog('[CF] Valid cached cookies found — ready.');
+    _fsReady = true;
     setAppStatus('ready');
     return true;
   }
@@ -130,12 +75,12 @@ async function startFlareSolverr() {
   setAppStatus('solving');
   try {
     await animepahe.preEmptiveSolve();
-    appLog('[FlareSolverr] Pre-emptive solve successful!');
+    appLog('[CF] Pre-emptive solve successful!');
+    _fsReady = true;
     setAppStatus('ready');
     return true;
   } catch (e) {
-    appLog(`[FlareSolverr] Pre-emptive solve failed: ${e.message}`);
-    appLog('[FlareSolverr] CF solve failed — app still usable, will retry on first request.');
+    appLog(`[CF] Pre-emptive solve failed: ${e.message}`);
     setAppStatus('error');
     return false;
   }
@@ -402,7 +347,7 @@ ipcMain.handle('start-download', async (event, opts) => {
 
     // Step 2: Extract kwik direct link
     appLog(`[Pipeline] Extracting kwik direct link...`);
-    const { directLink, referer } = await kwik.extractKwikLink(paheWinUrl);
+    const { directLink, referer } = await animepahe.extractKwikLink(paheWinUrl);
     appLog(`[Pipeline] Direct URL: ${directLink}`);
 
     // Step 3: Build destination path

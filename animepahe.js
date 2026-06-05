@@ -1,584 +1,492 @@
-const https = require('https');
-const http = require('http');
-const zlib = require('zlib');
-const { URL } = require('url');
+'use strict';
 
-// ─── Logger (replaced by main.js via setLogger) ───────────────────────────────
-let _log = (msg) => console.log('[animepahe]', msg);
+/**
+ * animepahe.js — mirrors session.py + animepahe.py exactly.
+ *
+ * Cookie cache schema (cookies_cache.json):
+ *   { cookies: { animepahe: {...}, kwik: {...} },
+ *     timestamps: { animepahe: <unix_seconds>, kwik: <unix_seconds> },
+ *     ua: "<user_agent>" }
+ *
+ * Keys:  "animepahe" for animepahe.pw + pahe.win
+ *        "kwik"      for kwik.cx / kwik.si / kwik.mn etc.
+ *
+ * TTL: 7 days (604800 s) — cf_clearance is valid that long on animepahe.
+ * On 403: clear stale key, re-solve via FlareSolverr, retry once.
+ */
+
+const https  = require('https');
+const http   = require('http');
+const zlib   = require('zlib');
+const fs     = require('fs');
+const path   = require('path');
+const { execFileSync } = require('child_process');
+const { URL } = require('url');
+const os     = require('os');
+
+const CURL = os.platform() === 'win32' ? 'curl.exe' : 'curl';
+
+// ─── logger ───────────────────────────────────────────────────────────────────
+let _log = msg => console.log('[animepahe]', msg);
 function setLogger(fn) { _log = fn; }
 
-// API calls and page requests go to .pw (unified to prevent CF bypass mismatch)
-const API_BASE = 'https://animepahe.pw';
+// ─── constants ────────────────────────────────────────────────────────────────
+const API_BASE  = 'https://animepahe.pw';
 const PAGE_BASE = 'https://animepahe.pw';
+const FLARESOLVERR_URL = 'http://127.0.0.1:8191/v1';
+const COOKIE_TTL = 604800; // 7 days in seconds
 
-const SERIES_URL_RE = /^https:\/\/animepahe\.(com|org|ru|si|pw)\/anime\/[a-f0-9\-]{36}$/;
+const SERIES_URL_RE  = /^https:\/\/animepahe\.(com|org|ru|si|pw)\/anime\/[a-f0-9\-]{36}$/;
 const EPISODE_URL_RE = /^https:\/\/animepahe\.(com|org|ru|si|pw)\/play\/[a-f0-9\-]{36}\/[a-f0-9]{64}$/;
 
-// User agent
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0';
+// ─── cookie cache (mirrors session.py exactly) ────────────────────────────────
+let _cookieCache = {};      // key → {name: value, ...}
+let _cookieTs    = {};      // key → unix seconds (float)
+let _solvedUa    = '';
+let _cacheFile   = null;
 
-// Cookie cache
-let cookieCache = {};
-let cookieTimestamps = {};
-const COOKIE_TTL = 604800; // 7 days
-
-// FlareSolverr URL
-const FLARESOLVERR_URL = 'http://127.0.0.1:8191/v1';
-
-let _cacheFile = null;
-
-// Initialize with userData path
 function init(userDataPath) {
-  const path = require('path');
-  _cacheFile = path.join(userDataPath, 'cf_cookies.json');
-  loadCookieCache();
+  _cacheFile = path.join(userDataPath, 'cookies_cache.json');
+  _loadCache();
 }
 
-// Load cookies from cache file
-function loadCookieCache() {
+function _loadCache() {
+  if (!_cacheFile || !fs.existsSync(_cacheFile)) return;
+  try {
+    const data = JSON.parse(fs.readFileSync(_cacheFile, 'utf8'));
+    _cookieCache = data.cookies    || {};
+    _cookieTs    = data.timestamps || {};
+    _solvedUa    = data.ua         || '';
+    _log(`[cache] Loaded cookies for keys: ${Object.keys(_cookieCache).join(', ') || 'none'}`);
+  } catch (e) {
+    _log(`[cache] Failed to load: ${e.message}`);
+  }
+}
+
+function _saveCache() {
   if (!_cacheFile) return;
   try {
-    const fs = require('fs');
-    if (fs.existsSync(_cacheFile)) {
-      const data = JSON.parse(fs.readFileSync(_cacheFile, 'utf8'));
-      cookieCache = data.cookies || {};
-      cookieTimestamps = data.timestamps || {};
-    }
+    fs.writeFileSync(_cacheFile, JSON.stringify({
+      cookies:    _cookieCache,
+      timestamps: _cookieTs,
+      ua:         _solvedUa
+    }), 'utf8');
   } catch (e) {
-    _log(`Failed to load cookie cache: ${e.message}`);
+    _log(`[cache] Failed to save: ${e.message}`);
   }
 }
 
-// Save cookies to cache file
-function saveCookieCache() {
-  if (!_cacheFile) return;
+// Mirrors session.py _cache_key()
+function _cacheKey(url) {
   try {
-    const fs = require('fs');
-    const data = {
-      cookies: cookieCache,
-      timestamps: cookieTimestamps
-    };
-    fs.writeFileSync(_cacheFile, JSON.stringify(data), 'utf8');
-  } catch (e) {
-    _log(`Failed to save cookie cache: ${e.message}`);
-  }
+    const host = new URL(url).hostname;
+    if (host.includes('animepahe') || host.includes('pahe.win')) return 'animepahe';
+    if (host.includes('kwik'))                                    return 'kwik';
+    return host;
+  } catch (_) { return url; }
 }
 
-// Get cache key for URL
-function getCacheKey(url) {
-  try {
-    const hostname = new URL(url).hostname;
-    if (hostname.includes('animepahe') || hostname.includes('pahe.win')) {
-      return 'animepahe';
-    }
-    if (hostname.includes('kwik')) {
-      return 'kwik';
-    }
-    return hostname;
-  } catch (e) {
-    return url;
-  }
-}
-
-// Get cached cookies if valid
-function getCachedCookies(url) {
-  const key = getCacheKey(url);
-  if (cookieCache[key]) {
-    const age = (Date.now() - (cookieTimestamps[key] || 0)) / 1000;
-    if (age < COOKIE_TTL) {
-      return cookieCache[key];
-    }
-    // Expired
-    delete cookieCache[key];
-    delete cookieTimestamps[key];
+// Mirrors session.py _get_cached()
+function _getCached(url) {
+  const key = _cacheKey(url);
+  if (_cookieCache[key]) {
+    const age = Date.now() / 1000 - (_cookieTs[key] || 0);
+    if (age < COOKIE_TTL) return _cookieCache[key];
+    // expired — evict from memory, keep file until re-solve
+    delete _cookieCache[key];
+    delete _cookieTs[key];
   }
   return {};
 }
 
-// Set cached cookies
-function setCachedCookies(url, cookies) {
-  const key = getCacheKey(url);
-  cookieCache[key] = cookies;
-  cookieTimestamps[key] = Date.now();
-  saveCookieCache();
+// Mirrors session.py _set_cached()
+function _setCached(url, cookies) {
+  const key = _cacheKey(url);
+  _cookieCache[key] = cookies;
+  _cookieTs[key]    = Date.now() / 1000;   // seconds, matching Python
+  _saveCache();
 }
 
-// Build cookie string
-function buildCookieString(url) {
-  const cached = getCachedCookies(url);
+function clearCache() {
+  _cookieCache = {};
+  _cookieTs    = {};
+  _saveCache();
+}
+
+// Mirrors session.py _build_cookie_str() — cached cookies only (no Chrome DB needed)
+function _buildCookieStr(url) {
+  const cached = _getCached(url);
   return Object.entries(cached)
+    .filter(([, v]) => v)
     .map(([k, v]) => `${k}=${v}`)
     .join('; ');
 }
 
-// HTTP request function (with gzip/deflate decompression)
-function httpRequest(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const isHttps = urlObj.protocol === 'https:';
-    const client = isHttps ? https : http;
+// ─── curl-based HTTP (mirrors session.py _curl) ───────────────────────────────
+// Uses curl.exe with --compressed so gzip/deflate is handled natively.
+function _curlGet(url, extraHeaders = {}) {
+  const cookieStr = _buildCookieStr(url);
+  const ua = _solvedUa || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0';
 
-    const body = options.data ? Buffer.from(options.data) : null;
+  const hdrFile  = path.join(os.tmpdir(), `fs_hdr_${Date.now()}.tmp`);
+  const bodyFile = path.join(os.tmpdir(), `fs_bod_${Date.now()}.tmp`);
 
-    const headers = {
-      'User-Agent': UA,
-      'Accept': 'text/html,application/xhtml+xml,application/json,*/*;q=0.9',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate',
-      'Connection': 'keep-alive',
-      'Cookie': buildCookieString(url),
-      ...options.headers
-    };
-    if (body) headers['Content-Length'] = body.length;
+  const args = [
+    '-s', '-S', '--compressed',
+    '--max-time', '30', '--connect-timeout', '15',
+    '-L', '--max-redirs', '5',
+    '-A', ua,
+    '-H', `Cookie: ${cookieStr}`,
+    '-H', 'Accept: text/html,application/xhtml+xml,application/json,*/*;q=0.9',
+    '-H', 'Accept-Language: en-US,en;q=0.9',
+    '-H', 'Accept-Encoding: gzip, deflate',
+    '-H', 'Connection: keep-alive',
+    '-H', 'Sec-Fetch-Dest: document',
+    '-H', 'Sec-Fetch-Mode: navigate',
+    '-H', 'Sec-Fetch-Site: same-origin',
+    '-D', hdrFile,
+    '-o', bodyFile,
+  ];
 
-    const requestOptions = {
-      hostname: urlObj.hostname,
-      port: urlObj.port || (isHttps ? 443 : 80),
-      path: urlObj.pathname + urlObj.search,
-      method: options.method || 'GET',
-      headers
-    };
+  for (const [k, v] of Object.entries(extraHeaders)) {
+    if (k.toLowerCase() !== 'cookie') args.push('-H', `${k}: ${v}`);
+  }
 
-    const req = client.request(requestOptions, (res) => {
-      // Follow redirects (up to 5)
-      if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
-        res.resume();
-        const redirectUrl = res.headers.location.startsWith('http')
-          ? res.headers.location
-          : `${urlObj.protocol}//${urlObj.host}${res.headers.location}`;
-        return httpRequest(redirectUrl, { ...options, _redirects: (options._redirects || 0) + 1 })
-          .then(resolve).catch(reject);
+  args.push(url);
+
+  try {
+    execFileSync(CURL, args, { timeout: 35000, stdio: ['ignore', 'ignore', 'ignore'] });
+  } catch (e) {
+    // curl exits non-zero on some redirects but still writes output — continue
+  }
+
+  let rawHdrs = Buffer.alloc(0);
+  let body    = Buffer.alloc(0);
+  try { rawHdrs = fs.readFileSync(hdrFile); } catch (_) {}
+  try { body    = fs.readFileSync(bodyFile); } catch (_) {}
+  try { fs.unlinkSync(hdrFile); } catch (_) {}
+  try { fs.unlinkSync(bodyFile); } catch (_) {}
+
+  return _parseCurlResponse(rawHdrs, body, url);
+}
+
+function _parseCurlResponse(rawHdrs, body, url) {
+  let status = 200;
+  const hdrs = {};
+  // May have multiple response blocks (redirects) — use the last one
+  const blocks = rawHdrs.toString('binary').split(/\r?\n\r?\n/);
+  let lastBlock = '';
+  for (const b of blocks) {
+    if (/HTTP\/[\d.]+/.test(b)) lastBlock = b;
+  }
+  if (lastBlock) {
+    const sm = lastBlock.match(/HTTP\/[\d.]+ (\d+)/);
+    if (sm) status = parseInt(sm[1]);
+    for (const line of lastBlock.split(/\r?\n/)) {
+      const ci = line.indexOf(':');
+      if (ci > 0 && !line.startsWith('HTTP')) {
+        hdrs[line.slice(0, ci).trim().toLowerCase()] = line.slice(ci + 1).trim();
       }
-
-      const encoding = res.headers['content-encoding'] || '';
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('error', reject);
-      res.on('end', () => {
-        const raw = Buffer.concat(chunks);
-        const decompress = encoding.includes('gzip')
-          ? cb => zlib.gunzip(raw, cb)
-          : encoding.includes('deflate')
-            ? cb => zlib.inflate(raw, cb)
-            : cb => cb(null, raw);
-
-        decompress((err, decompressed) => {
-          const buf = err ? raw : decompressed;
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body: buf,
-            text: () => buf.toString('utf8'),
-            json: () => JSON.parse(buf.toString('utf8'))
-          });
-        });
-      });
-    });
-
-    req.on('error', reject);
-    if (body) req.write(body);
-    req.end();
-  });
+    }
+  }
+  const text = () => body.toString('utf8');
+  const json = () => JSON.parse(body.toString('utf8'));
+  return { status, headers: hdrs, body, text, json, _rawHeaders: hdrs };
 }
 
-// Check if FlareSolverr is running
+// ─── FlareSolverr ─────────────────────────────────────────────────────────────
 function isFlareSolverrRunning() {
-  return new Promise((resolve) => {
-    http.get('http://127.0.0.1:8191/', { timeout: 1000 }, (res) => {
-      resolve(true);
-    }).on('error', () => {
-      resolve(false);
-    });
+  return new Promise(resolve => {
+    http.get('http://127.0.0.1:8191/', { timeout: 2000 }, () => resolve(true))
+        .on('error', () => resolve(false));
   });
 }
 
-// Solve Cloudflare with FlareSolverr
+// Mirrors session.py solve_cf_once() — skips if valid cookies exist, caches UA
 async function solveCloudflare(url) {
-  _log(`[solveCloudflare] Checking if FlareSolverr is running...`);
-  const isRunning = await isFlareSolverrRunning();
-  if (!isRunning) {
+  _log(`[solveCloudflare] Checking FlareSolverr for: ${url}`);
+
+  if (!await isFlareSolverrRunning()) {
     throw new Error('FlareSolverr is not running on :8191');
   }
-  _log(`[solveCloudflare] FlareSolverr is up. Sending request.get for: ${url}`);
 
-  const payload = JSON.stringify({
-    cmd: 'request.get',
-    url: url,
-    maxTimeout: 180000
+  // Skip if we already have a valid cf_clearance (mirrors Python force=False path)
+  const existing = _getCached(url);
+  if (existing.cf_clearance) {
+    const ageH = (Date.now() / 1000 - (_cookieTs[_cacheKey(url)] || 0)) / 3600;
+    _log(`[solveCloudflare] Using cached CF cookies (age: ${ageH.toFixed(1)}h, valid 7 days)`);
+    return { cookies: existing, userAgent: _solvedUa };
+  }
+
+  _log(`[solveCloudflare] Asking FlareSolverr to solve CF for ${url} (takes 60-180s)…`);
+
+  const payload = JSON.stringify({ cmd: 'request.get', url, maxTimeout: 180000 });
+
+  // POST to FlareSolverr via plain http (no gzip, no redirect issues)
+  const result = await new Promise((resolve, reject) => {
+    const body = Buffer.from(payload);
+    // 200s timeout — longer than FS maxTimeout (180s) so FS always replies first
+    const timer = setTimeout(() => reject(new Error('FlareSolverr POST timed out (200s)')), 200000);
+
+    const req = http.request({
+      hostname: '127.0.0.1', port: 8191, path: '/v1', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': body.length }
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        clearTimeout(timer);
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          resolve({ httpStatus: res.statusCode, data });
+        } catch (e) {
+          reject(new Error(`FlareSolverr non-JSON response: ${Buffer.concat(chunks).toString('utf8').slice(0, 200)}`));
+        }
+      });
+    });
+    req.on('error', e => { clearTimeout(timer); reject(e); });
+    req.write(body);
+    req.end();
   });
 
-  // Wrap with a timeout slightly longer than FlareSolverr's own maxTimeout (180s)
-  const fetchWithTimeout = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('FlareSolverr POST timed out after 200 seconds')), 200000);
-    httpRequest(FLARESOLVERR_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      data: payload
-    }).then(r => { clearTimeout(timer); resolve(r); })
-      .catch(e => { clearTimeout(timer); reject(e); });
-  });
+  _log(`[solveCloudflare] FlareSolverr HTTP ${result.httpStatus}, status: ${result.data.status}`);
 
-  let response;
-  try {
-    response = await fetchWithTimeout;
-  } catch (e) {
-    _log(`[solveCloudflare] HTTP POST to FlareSolverr failed: ${e.message}`);
-    throw e;
+  if (result.data.status !== 'ok') {
+    throw new Error(`FlareSolverr: ${result.data.message || JSON.stringify(result.data)}`);
   }
 
-  _log(`[solveCloudflare] Got HTTP ${response.status} from FlareSolverr`);
+  const solution = result.data.solution || {};
+  const cookies  = {};
+  for (const c of (solution.cookies || [])) cookies[c.name] = c.value;
 
-  let data;
-  try {
-    data = response.json();
-  } catch (e) {
-    const raw = response.text ? response.text() : '(no body)';
-    _log(`[solveCloudflare] Failed to parse JSON: ${e.message} — body: ${raw.slice(0, 300)}`);
-    throw new Error(`FlareSolverr returned non-JSON: ${raw.slice(0, 200)}`);
+  if (solution.userAgent) {
+    _solvedUa = solution.userAgent;
+    _log(`[solveCloudflare] Captured UA: ${_solvedUa.slice(0, 80)}`);
   }
-
-  _log(`[solveCloudflare] FlareSolverr status: ${data.status}`);
-
-  if (data.status !== 'ok') {
-    throw new Error(`FlareSolverr: ${data.message || JSON.stringify(data)}`);
-  }
-
-  const solution = data.solution || {};
-  const cookies = {};
-  (solution.cookies || []).forEach(c => { cookies[c.name] = c.value; });
 
   _log(`[solveCloudflare] Got ${Object.keys(cookies).length} cookies: ${Object.keys(cookies).join(', ')}`);
+  _setCached(url, cookies);
 
-  setCachedCookies(url, cookies);
-
-  return {
-    status: solution.status || 200,
-    html: solution.response || '',
-    cookies,
-    userAgent: solution.userAgent || ''
-  };
+  return { cookies, userAgent: _solvedUa };
 }
 
-// Request with CF bypass
-async function request(url, options = {}) {
-  let response;
-  try {
-    response = await httpRequest(url, options);
-    if (response.status !== 403 && response.status !== 503) {
-      return response;
-    }
-    _log(`[request] Got ${response.status} from ${url} — CF challenge detected`);
-  } catch (e) {
-    _log(`[request] Initial request threw: ${e.message}`);
-    throw e;
-  }
+// Mirrors session.py request() — fast path curl, on 403 re-solve once
+async function request(url, extraHeaders = {}) {
+  let resp = _curlGet(url, extraHeaders);
+  _log(`[request] ${url} → ${resp.status}`);
 
-  // Clear stale cookies so re-solve gets fresh ones
-  const key = getCacheKey(url);
-  delete cookieCache[key];
-  delete cookieTimestamps[key];
+  if (resp.status !== 403 && resp.status !== 503) return resp;
 
-  _log(`[request] Checking if FlareSolverr is up...`);
-  const isRunning = await isFlareSolverrRunning();
-  if (!isRunning) {
-    _log(`[request] FlareSolverr not running — cannot bypass CF for ${url}`);
+  _log(`[request] CF challenge (${resp.status}) on ${url} — re-solving…`);
+
+  // Clear stale cookies for this domain before re-solving
+  const key = _cacheKey(url);
+  delete _cookieCache[key];
+  delete _cookieTs[key];
+
+  if (!await isFlareSolverrRunning()) {
     throw new Error(`CF challenge on ${url} and FlareSolverr is not running`);
   }
 
-  _log(`[request] Solving CF for ${url} via FlareSolverr...`);
-  try {
-    const urlObj = new URL(url);
-    const solveUrl = `${urlObj.protocol}//${urlObj.hostname}`;
-    await solveCloudflare(solveUrl);
-    _log('[request] CF bypass succeeded, retrying original request...');
-    return await httpRequest(url, options);
-  } catch (e) {
-    _log(`[request] FlareSolverr bypass failed: ${e.message}`);
-    throw new Error(`CF bypass failed for ${url}: ${e.message}`);
-  }
+  // Solve for root domain (mirrors Python: _p.scheme + "://" + _p.netloc)
+  const urlObj   = new URL(url);
+  const solveUrl = `${urlObj.protocol}//${urlObj.hostname}`;
+  await solveCloudflare(solveUrl);
+
+  _log('[request] Bypass succeeded, retrying…');
+  resp = _curlGet(url, extraHeaders);
+  _log(`[request] Retry → ${resp.status}`);
+  return resp;
 }
 
-// Pre-emptive solve — only animepahe.pw needed
-async function preEmptiveSolve() {
-  const url = 'https://animepahe.pw';
-  _log(`Pre-emptively solving CF for ${url}...`);
-  await solveCloudflare(url);
-  _log(`Pre-emptive solve for ${url} successful.`);
-}
-
-// Check if cookies are valid
+// ─── public helpers ───────────────────────────────────────────────────────────
 function hasValidCookies() {
-  // If we have animepahe cookies less than 7 days old, we consider it valid
-  const cached = getCachedCookies('https://animepahe.pw');
-  return Object.keys(cached).length > 0;
+  const cached = _getCached('https://animepahe.pw');
+  return !!cached.cf_clearance;
 }
 
-// Search anime
+// Pre-emptive solve on startup — skip if already have cf_clearance
+async function preEmptiveSolve() {
+  const cached = _getCached('https://animepahe.pw');
+  if (cached.cf_clearance) {
+    const ageH = (Date.now() / 1000 - (_cookieTs['animepahe'] || 0)) / 3600;
+    _log(`[boot] Valid CF cookies found (age ${ageH.toFixed(1)}h) — skipping pre-emptive solve.`);
+    return;
+  }
+  _log('[boot] No valid CF cookies — solving now…');
+  await solveCloudflare('https://animepahe.pw');
+}
+
+// ─── AnimePahe API (mirrors animepahe.py) ─────────────────────────────────────
+function isSeriesUrl(url)  { return SERIES_URL_RE.test(url); }
+function isEpisodeUrl(url) { return EPISODE_URL_RE.test(url); }
+
+function getSeriesId(url) {
+  const m = url.match(/anime\/([a-f0-9\-]{36})/);
+  if (!m) throw new Error(`Cannot extract series ID from: ${url}`);
+  return m[1];
+}
+
 async function searchAnime(query) {
   _log(`Searching for: ${query}`);
-  const url = `${API_BASE}/api?m=search&q=${encodeURIComponent(query)}`;
-  const response = await request(url);
-  const data = response.json();
-  return data.data || [];
+  const resp = await request(`${API_BASE}/api?m=search&q=${encodeURIComponent(query)}`);
+  if (resp.status >= 400) throw new Error(`Search HTTP ${resp.status}`);
+  return resp.json().data || [];
 }
 
-// Fetch anime info
 async function fetchAnimeInfo(animeId) {
-  const url = `${API_BASE}/api?m=anime&id=${animeId}`;
-  const response = await request(url);
-  return response.json();
+  const resp = await request(`${API_BASE}/api?m=anime&id=${animeId}`);
+  if (resp.status >= 400) throw new Error(`fetchAnimeInfo HTTP ${resp.status}`);
+  return resp.json();
 }
 
-// Fetch poster
 async function fetchPoster(animeId) {
-  try {
-    const info = await fetchAnimeInfo(animeId);
-    return info.poster || '';
-  } catch (e) {
-    return '';
-  }
+  try { return (await fetchAnimeInfo(animeId)).poster || ''; } catch (_) { return ''; }
 }
 
-// Check if series URL
-function isSeriesUrl(url) {
-  return SERIES_URL_RE.test(url);
+function unescapeHTML(str) {
+  return str.replace(/&amp;|&lt;|&gt;|&quot;|&#39;/g, m =>
+    ({ '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" }[m]));
 }
 
-// Check if episode URL
-function isEpisodeUrl(url) {
-  return EPISODE_URL_RE.test(url);
-}
-
-// Get series ID from URL
-function getSeriesId(url) {
-  const match = url.match(/anime\/([a-f0-9\-]{36})/);
-  if (!match) {
-    throw new Error(`Cannot extract series ID from: ${url}`);
-  }
-  return match[1];
-}
-
-// Fetch metadata
 async function fetchMetadata(url, isSeries) {
   const seriesId = isSeriesUrl(url) ? getSeriesId(url) : null;
-  
+
   if (seriesId) {
     try {
       const info = await fetchAnimeInfo(seriesId);
       return {
-        title: info.title || '',
-        type: info.type || '',
-        episode_count: info.episodes || '',
-        poster: info.poster || '',
-        session: info.session || '',
-        id: seriesId
+        title: info.title || '', type: info.type || '',
+        episode_count: info.episodes || '', poster: info.poster || '',
+        session: info.session || '', id: seriesId
       };
     } catch (e) {
-      _log(`API metadata failed (${e.message}), falling back to scraping...`);
+      _log(`API metadata failed (${e.message}), falling back to scraping…`);
     }
   }
 
-  // Scrape fallback
-  _log('Fetching metadata via scraping...');
-  const response = await request(url);
-  const text = response.text().replace(/\r\n/g, '').replace(/\n/g, '').replace(/\r/g, '');
+  _log('Fetching metadata via scraping…');
+  const resp = await request(url);
+  const text = resp.text().replace(/\r\n|\n|\r/g, '');
 
   if (isSeries) {
     let title = '', epCount = '', animeType = '', poster = '';
-    
-    const titleMatch = text.match(/style=[^=]+title="([^"]+)"/);
-    if (titleMatch) title = unescapeHTML(titleMatch[1]);
-    
-    const typeMatch = text.match(/Type:[^>]*title="[^"]*"[^>]*>([^<]+)<\/a>/);
-    if (typeMatch) animeType = unescapeHTML(typeMatch[1]);
-    
-    const epMatch = text.match(/Episode[^>]*>\s*(\S*)<\/p/);
-    if (epMatch) epCount = unescapeHTML(epMatch[1]);
-    
-    const posterMatch = text.match(/(https:\/\/i\.animepahe\.pw\/posters\/[^"]+)/);
-    if (posterMatch) poster = posterMatch[1];
-    
+    const t1 = text.match(/style=[^=]+title="([^"]+)"/);             if (t1) title     = unescapeHTML(t1[1]);
+    const t2 = text.match(/Type:[^>]*title="[^"]*"[^>]*>([^<]+)<\/a>/); if (t2) animeType = unescapeHTML(t2[1]);
+    const t3 = text.match(/Episode[^>]*>\s*(\S*)<\/p/);              if (t3) epCount   = unescapeHTML(t3[1]);
+    const t4 = text.match(/(https:\/\/i\.animepahe\.pw\/posters\/[^"]+)/); if (t4) poster    = t4[1];
     return { title, type: animeType, episode_count: epCount, poster };
   } else {
     let title = '', episode = '', poster = '';
-    
-    const match = text.match(/title="[^>]*>([^<]*)<\/a>\D*(\d*)<span/);
-    if (match) {
-      title = unescapeHTML(match[1]);
-      episode = unescapeHTML(match[2]);
-    }
-    
-    const posterMatch = text.match(/(https:\/\/i\.animepahe\.pw\/posters\/[^"]+)/);
-    if (posterMatch) poster = posterMatch[1];
-    
+    const m = text.match(/title="[^>]*>([^<]*)<\/a>\D*(\d*)<span/);
+    if (m) { title = unescapeHTML(m[1]); episode = unescapeHTML(m[2]); }
+    const p = text.match(/(https:\/\/i\.animepahe\.pw\/posters\/[^"]+)/);
+    if (p) poster = p[1];
     return { title, episode, poster };
   }
 }
 
-// Get episode count
-async function getEpisodeCount(seriesId, url) {
-  const apiUrl = `${API_BASE}/api?m=release&id=${seriesId}&sort=episode_asc&page=1`;
-  const response = await request(apiUrl);
-  const data = response.json();
-  return data.total || 0;
+async function getEpisodeCount(seriesId) {
+  const resp = await request(`${API_BASE}/api?m=release&id=${seriesId}&sort=episode_asc&page=1`);
+  if (resp.status >= 400) throw new Error(`getEpisodeCount HTTP ${resp.status}`);
+  return resp.json().total || 0;
 }
 
-// Get page number for episode
-function getPageNumber(n) {
-  return Math.max(1, Math.floor((n + 29) / 30));
-}
+function _getPage(n) { return Math.max(1, Math.floor((n + 29) / 30)); }
 
-// Fetch series episode links
 async function fetchSeriesEpisodeLinks(url, epRange) {
   const seriesId = getSeriesId(url);
-  const total = await getEpisodeCount(seriesId, url);
+  const total    = await getEpisodeCount(seriesId);
   const [start, end] = epRange;
 
-  if (start > total || end > total) {
+  if (start > total || end > total)
     throw new Error(`Episode range ${start}-${end} out of bounds (total: ${total})`);
-  }
 
   const links = [];
-  for (let page = getPageNumber(start); page <= getPageNumber(end); page++) {
-    console.log(`Fetching page ${page}...`);
-    const apiUrl = `${API_BASE}/api?m=release&id=${seriesId}&sort=episode_asc&page=${page}`;
-    const response = await request(apiUrl);
-    const data = response.json();
-    
-    for (const ep of data.data || []) {
+  for (let page = _getPage(start); page <= _getPage(end); page++) {
+    _log(`Fetching episode page ${page}…`);
+    const resp = await request(`${API_BASE}/api?m=release&id=${seriesId}&sort=episode_asc&page=${page}`);
+    if (resp.status >= 400) throw new Error(`Episode page HTTP ${resp.status}`);
+    for (const ep of (resp.json().data || []))
       links.push(`${PAGE_BASE}/play/${seriesId}/${ep.session || ''}`);
-    }
   }
 
-  const offset = (getPageNumber(start) - 1) * 30;
-  return links.filter((_, i) => start <= offset + i + 1 <= end);
+  const offset = (_getPage(start) - 1) * 30;
+  return links.filter((_, i) => start <= offset + i + 1 && offset + i + 1 <= end);
 }
 
-// Fetch pahe win links
 async function fetchPaheWinLinks(playUrl, targetRes, audioLang) {
-  const response = await request(playUrl);
-  const text = response.text().replace(/\r\n/g, '').replace(/\n/g, '').replace(/\r/g, '');
+  const resp = await request(playUrl);
+  if (resp.status >= 400) throw new Error(`fetchPaheWinLinks HTTP ${resp.status}`);
+  const text = resp.text().replace(/\r\n|\n|\r/g, '');
 
   const candidates = [];
 
   // Attempt 1: JSON in <script> tag
-  const jsonMatch = text.match(/let\s+links\s*=\s*(\{.*?\})\s*;?\s*(?:let|var|const|<\/)/);
-  if (jsonMatch) {
+  const jm = text.match(/let\s+links\s*=\s*(\{.*?\})\s*;?\s*(?:let|var|const|<\/)/);
+  if (jm) {
     try {
-      const linksJson = JSON.parse(jsonMatch[1]);
-      for (const [epKey, resolutions] of Object.entries(linksJson)) {
+      const linksJson = JSON.parse(jm[1]);
+      for (const resolutions of Object.values(linksJson)) {
         for (const [resStr, sources] of Object.entries(resolutions)) {
-          if (typeof sources === 'object') {
-            const paheWin = sources.kwik_pahewin || sources.kwik;
-            let lang = sources.audio || 'jpn';
-            
-            // Normalize language code
-            if (lang.toLowerCase().includes('eng') || ['en', 'dub'].includes(lang.toLowerCase())) {
-              lang = 'en';
-            } else if (lang.toLowerCase().includes('chi') || ['zh'].includes(lang.toLowerCase())) {
-              lang = 'zh';
-            } else {
-              lang = 'jp';
-            }
-            
-            const resMatch = resStr.match(/\d+/);
-            const res = resMatch ? parseInt(resMatch[0]) : 0;
-            
-            if (paheWin) {
-              candidates.push({ dPaheLink: paheWin, epRes: res, epLang: lang });
-            }
-          }
+          if (typeof sources !== 'object') continue;
+          const paheWin = sources.kwik_pahewin || sources.kwik;
+          let lang = sources.audio || 'jpn';
+          if (lang.toLowerCase().includes('eng') || ['en','dub'].includes(lang.toLowerCase())) lang = 'en';
+          else if (lang.toLowerCase().includes('chi') || lang.toLowerCase() === 'zh') lang = 'zh';
+          else lang = 'jp';
+          const resMatch = resStr.match(/\d+/);
+          if (paheWin) candidates.push({ dPaheLink: paheWin, epRes: resMatch ? parseInt(resMatch[0]) : 0, epLang: lang });
         }
       }
-    } catch (e) {
-      _log(`Failed to parse JSON links: ${e.message}`);
-    }
+    } catch (e) { _log(`JSON links parse failed: ${e.message}`); }
   }
 
-  // Attempt 2: <a href="https://pahe.win/..."> anchor tags
-  if (candidates.length === 0) {
-    const anchorRegex = /<a href="(https?:\/\/pahe\.win\/\S*)"[^>]*>(.*?)<\/a>/g;
-    let match;
-    while ((match = anchorRegex.exec(text)) !== null) {
-      const dLink = unescapeHTML(match[1]);
-      const block = match[2];
-      const resMatch = block.match(/\b(\d{3,4})p\b/);
-      const res = resMatch ? parseInt(resMatch[1]) : 0;
+  // Attempt 2: <a href="https://pahe.win/...">
+  if (!candidates.length) {
+    const ar = /<a href="(https?:\/\/pahe\.win\/\S*)"[^>]*>(.*?)<\/a>/g;
+    let m;
+    while ((m = ar.exec(text)) !== null) {
+      const dLink   = unescapeHTML(m[1]);
+      const block   = m[2];
+      const resM    = block.match(/\b(\d{3,4})p\b/);
       let lang = 'jp';
-      
-      const spanRegex = /<span[^>]*>([^<]*)<\/span>/g;
-      let spanMatch;
-      while ((spanMatch = spanRegex.exec(block)) !== null) {
-        const s = spanMatch[1].trim().toLowerCase();
-        if (s === 'dub') {
-          lang = 'en';
-          break;
-        } else if (s === 'chi') {
-          lang = 'zh';
-          break;
-        } else if (s !== 'bd' && s !== '') {
-          lang = s;
-          break;
-        }
+      const spanR = /<span[^>]*>([^<]*)<\/span>/g;
+      let sm;
+      while ((sm = spanR.exec(block)) !== null) {
+        const s = sm[1].trim().toLowerCase();
+        if (s === 'dub') { lang = 'en'; break; }
+        else if (s === 'chi') { lang = 'zh'; break; }
+        else if (s !== 'bd' && s !== '') { lang = s; break; }
       }
-      
-      candidates.push({ dPaheLink: dLink, epRes: res, epLang: lang });
+      candidates.push({ dPaheLink: dLink, epRes: resM ? parseInt(resM[1]) : 0, epLang: lang });
     }
   }
 
-  // Attempt 3: kwik.cx links directly
-  if (candidates.length === 0) {
-    const kwikRegex = /href="(https?:\/\/kwik\.cx\/e\/[^"]+)"/g;
-    let match;
-    while ((match = kwikRegex.exec(text)) !== null) {
-      candidates.push({ dPaheLink: match[1], epRes: 0, epLang: 'jp' });
-    }
+  // Attempt 3: kwik.cx direct
+  if (!candidates.length) {
+    const kr = /href="(https?:\/\/kwik\.cx\/e\/[^"]+)"/g;
+    let m;
+    while ((m = kr.exec(text)) !== null)
+      candidates.push({ dPaheLink: m[1], epRes: 0, epLang: 'jp' });
   }
 
-  if (candidates.length === 0) {
-    throw new Error(`No download links found on ${playUrl}`);
-  }
+  if (!candidates.length) throw new Error(`No download links found on ${playUrl}`);
 
   const filtered = candidates.filter(c => c.epLang === audioLang);
-  const finalFiltered = filtered.length > 0 ? filtered : candidates;
+  const pool     = filtered.length ? filtered : candidates;
 
-  if (targetRes === 0) {
-    return finalFiltered.reduce((a, b) => a.epRes > b.epRes ? a : b);
-  } else if (targetRes === -1) {
-    return finalFiltered.reduce((a, b) => a.epRes < b.epRes ? a : b);
-  } else {
-    const exact = finalFiltered.find(c => c.epRes === targetRes);
-    return exact || finalFiltered.reduce((a, b) => a.epRes > b.epRes ? a : b);
-  }
-}
-
-// Unescape HTML
-function unescapeHTML(str) {
-  const map = {
-    '&amp;': '&',
-    '&lt;': '<',
-    '&gt;': '>',
-    '&quot;': '"',
-    '&#39;': "'"
-  };
-  return str.replace(/&amp;|&lt;|&gt;|&quot;|&#39;/g, m => map[m]);
+  if (targetRes === 0)  return pool.reduce((a, b) => a.epRes > b.epRes ? a : b);
+  if (targetRes === -1) return pool.reduce((a, b) => a.epRes < b.epRes ? a : b);
+  return pool.find(c => c.epRes === targetRes) || pool.reduce((a, b) => a.epRes > b.epRes ? a : b);
 }
 
 module.exports = {
-  init,
-  hasValidCookies,
-  preEmptiveSolve,
-  setLogger,
-  searchAnime,
-  fetchAnimeInfo,
-  fetchPoster,
-  isSeriesUrl,
-  isEpisodeUrl,
-  getSeriesId,
-  fetchMetadata,
-  getEpisodeCount,
-  fetchSeriesEpisodeLinks,
-  fetchPaheWinLinks,
-  solveCloudflare,
-  isFlareSolverrRunning
+  init, setLogger,
+  hasValidCookies, preEmptiveSolve, solveCloudflare, isFlareSolverrRunning,
+  isSeriesUrl, isEpisodeUrl, getSeriesId,
+  searchAnime, fetchAnimeInfo, fetchPoster,
+  fetchMetadata, getEpisodeCount, fetchSeriesEpisodeLinks, fetchPaheWinLinks,
+  // expose cache internals for kwik.js
+  _getCached, _setCached, _cacheKey, _buildCookieStr, _solvedUa: () => _solvedUa
 };

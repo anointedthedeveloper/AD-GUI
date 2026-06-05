@@ -101,6 +101,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     ipcRenderer.on('flaresolverr-state', (e, state) => setUiState(state));
 
+    // Check initial status in case we missed the event
+    ipcRenderer.invoke('flaresolverr-status').then(result => {
+        if (result.running) {
+            setUiState('ready');
+        }
+    });
+
     // ── Recent searches ─────────────────────────────────────────────────────────
     function loadRecentSearches() {
         const recentSearches = JSON.parse(localStorage.getItem('recentSearches') || '[]');
