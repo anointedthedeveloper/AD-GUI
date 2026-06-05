@@ -1,5 +1,6 @@
 const https = require('https');
 const http = require('http');
+const zlib = require('zlib');
 const { URL } = require('url');
 
 // ─── Logger (replaced by main.js via setLogger) ───────────────────────────────
@@ -110,13 +111,15 @@ function buildCookieString(url) {
     .join('; ');
 }
 
-// HTTP request function
+// HTTP request function (with gzip/deflate decompression)
 function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
     const isHttps = urlObj.protocol === 'https:';
     const client = isHttps ? https : http;
-    
+
+    const body = options.data ? Buffer.from(options.data) : null;
+
     const headers = {
       'User-Agent': UA,
       'Accept': 'text/html,application/xhtml+xml,application/json,*/*;q=0.9',
@@ -126,36 +129,54 @@ function httpRequest(url, options = {}) {
       'Cookie': buildCookieString(url),
       ...options.headers
     };
+    if (body) headers['Content-Length'] = body.length;
 
     const requestOptions = {
       hostname: urlObj.hostname,
       port: urlObj.port || (isHttps ? 443 : 80),
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
-      headers: headers
+      headers
     };
 
     const req = client.request(requestOptions, (res) => {
-      let data = [];
-      res.on('data', (chunk) => data.push(chunk));
+      // Follow redirects (up to 5)
+      if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        const redirectUrl = res.headers.location.startsWith('http')
+          ? res.headers.location
+          : `${urlObj.protocol}//${urlObj.host}${res.headers.location}`;
+        return httpRequest(redirectUrl, { ...options, _redirects: (options._redirects || 0) + 1 })
+          .then(resolve).catch(reject);
+      }
+
+      const encoding = res.headers['content-encoding'] || '';
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('error', reject);
       res.on('end', () => {
-        const body = Buffer.concat(data);
-        resolve({
-          status: res.statusCode,
-          headers: res.headers,
-          body: body,
-          text: () => body.toString('utf8'),
-          json: () => JSON.parse(body.toString('utf8'))
+        const raw = Buffer.concat(chunks);
+        const decompress = encoding.includes('gzip')
+          ? cb => zlib.gunzip(raw, cb)
+          : encoding.includes('deflate')
+            ? cb => zlib.inflate(raw, cb)
+            : cb => cb(null, raw);
+
+        decompress((err, decompressed) => {
+          const buf = err ? raw : decompressed;
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            body: buf,
+            text: () => buf.toString('utf8'),
+            json: () => JSON.parse(buf.toString('utf8'))
+          });
         });
       });
     });
 
     req.on('error', reject);
-    
-    if (options.data) {
-      req.write(options.data);
-    }
-    
+    if (body) req.write(body);
     req.end();
   });
 }
@@ -184,18 +205,12 @@ async function solveCloudflare(url) {
     maxTimeout: 180000
   });
 
-  const options = {
-    hostname: '127.0.0.1',
-    port: 8191,
-    path: '/v1',
+  const response = await httpRequest(FLARESOLVERR_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
+    headers: { 'Content-Type': 'application/json' },
     data: payload
-  };
+  });
 
-  const response = await httpRequest(FLARESOLVERR_URL, options);
   const data = response.json();
 
   if (data.status !== 'ok') {
@@ -209,7 +224,7 @@ async function solveCloudflare(url) {
   });
 
   setCachedCookies(url, cookies);
-  
+
   return {
     status: solution.status || 200,
     html: solution.response || '',
