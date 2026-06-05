@@ -262,19 +262,12 @@ async function request(url, options = {}) {
   throw new Error(`Request failed for ${url}`);
 }
 
-// Pre-emptive solve
+// Pre-emptive solve — only animepahe.pw needed
 async function preEmptiveSolve() {
-  const domains = ['https://animepahe.pw', 'https://pahe.win'];
-  for (const url of domains) {
-    _log(`Pre-emptively solving CF for ${url}...`);
-    try {
-      await solveCloudflare(url);
-      _log(`Pre-emptive solve for ${url} successful.`);
-    } catch (e) {
-      _log(`Pre-emptive solve for ${url} failed: ${e.message}`);
-      throw e;
-    }
-  }
+  const url = 'https://animepahe.pw';
+  _log(`Pre-emptively solving CF for ${url}...`);
+  await solveCloudflare(url);
+  _log(`Pre-emptive solve for ${url} successful.`);
 }
 
 // Check if cookies are valid

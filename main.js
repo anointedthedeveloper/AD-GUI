@@ -88,9 +88,11 @@ async function startFlareSolverr() {
           cwd:         path.dirname(FS_EXE),
           detached:    false,
           windowsHide: true,
-          stdio:       'ignore'
+          stdio:       ['ignore', 'pipe', 'pipe']
         }
       );
+      _fsProc.stdout.on('data', d => appLog(`[FlareSolverr stdout] ${d.toString().trim()}`));
+      _fsProc.stderr.on('data', d => appLog(`[FlareSolverr stderr] ${d.toString().trim()}`));
       _fsProc.on('error', (e) => { appLog(`[FlareSolverr] Spawn error: ${e.message}`); setAppStatus('error'); });
       _fsProc.on('exit',  (c) => { appLog(`[FlareSolverr] Exited (code ${c})`); _fsReady = false; });
     } catch (e) {
