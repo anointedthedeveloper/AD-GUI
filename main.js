@@ -370,29 +370,3 @@ ipcMain.handle('delete-file', async (event, filePath) => {
     return { success: false, message: 'Failed to delete file.' };
   }
 });
-
-// Window control handlers
-ipcMain.handle('minimize-window', async () => {
-  if (mainWindow) {
-    mainWindow.minimize();
-  }
-  return { success: true };
-});
-
-ipcMain.handle('maximize-window', async () => {
-  if (mainWindow) {
-    if (mainWindow.isMaximized()) {
-      mainWindow.unmaximize();
-    } else {
-      mainWindow.maximize();
-    }
-  }
-  return { success: true };
-});
-
-ipcMain.handle('close-window', async () => {
-  if (mainWindow) {
-    mainWindow.close();
-  }
-  return { success: true };
-});
