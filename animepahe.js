@@ -194,10 +194,12 @@ function isFlareSolverrRunning() {
 
 // Solve Cloudflare with FlareSolverr
 async function solveCloudflare(url) {
+  _log(`[solveCloudflare] Checking if FlareSolverr is running...`);
   const isRunning = await isFlareSolverrRunning();
   if (!isRunning) {
-    throw new Error('FlareSolverr is not running. Please start it first.');
+    throw new Error('FlareSolverr is not running on :8191');
   }
+  _log(`[solveCloudflare] FlareSolverr is up. Sending request.get for: ${url}`);
 
   const payload = JSON.stringify({
     cmd: 'request.get',
@@ -205,61 +207,95 @@ async function solveCloudflare(url) {
     maxTimeout: 180000
   });
 
-  const response = await httpRequest(FLARESOLVERR_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    data: payload
+  // Wrap in a timeout so it can't hang forever (3 min max)
+  const fetchWithTimeout = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('FlareSolverr POST timed out after 3 minutes')), 185000);
+    httpRequest(FLARESOLVERR_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: payload
+    }).then(r => { clearTimeout(timer); resolve(r); })
+      .catch(e => { clearTimeout(timer); reject(e); });
   });
 
-  const data = response.json();
+  let response;
+  try {
+    response = await fetchWithTimeout;
+  } catch (e) {
+    _log(`[solveCloudflare] HTTP POST to FlareSolverr failed: ${e.message}`);
+    throw e;
+  }
+
+  _log(`[solveCloudflare] Got HTTP ${response.status} from FlareSolverr`);
+
+  let data;
+  try {
+    data = response.json();
+  } catch (e) {
+    const raw = response.text ? response.text() : '(no body)';
+    _log(`[solveCloudflare] Failed to parse JSON: ${e.message} — body: ${raw.slice(0, 300)}`);
+    throw new Error(`FlareSolverr returned non-JSON: ${raw.slice(0, 200)}`);
+  }
+
+  _log(`[solveCloudflare] FlareSolverr status: ${data.status}`);
 
   if (data.status !== 'ok') {
-    throw new Error(`FlareSolverr: ${data.message || 'unknown error'}`);
+    throw new Error(`FlareSolverr: ${data.message || JSON.stringify(data)}`);
   }
 
   const solution = data.solution || {};
   const cookies = {};
-  (solution.cookies || []).forEach(c => {
-    cookies[c.name] = c.value;
-  });
+  (solution.cookies || []).forEach(c => { cookies[c.name] = c.value; });
+
+  _log(`[solveCloudflare] Got ${Object.keys(cookies).length} cookies: ${Object.keys(cookies).join(', ')}`);
 
   setCachedCookies(url, cookies);
 
   return {
     status: solution.status || 200,
     html: solution.response || '',
-    cookies: cookies,
+    cookies,
     userAgent: solution.userAgent || ''
   };
 }
 
 // Request with CF bypass
 async function request(url, options = {}) {
+  let response;
   try {
-    const response = await httpRequest(url, options);
+    response = await httpRequest(url, options);
     if (response.status !== 403 && response.status !== 503) {
       return response;
     }
+    _log(`[request] Got ${response.status} from ${url} — CF challenge detected`);
   } catch (e) {
-    // If request fails due to socket error, fall through to CF bypass
+    _log(`[request] Initial request threw: ${e.message}`);
+    throw e;
   }
 
-  // Try CF bypass on 403/503
+  // Clear stale cookies so re-solve gets fresh ones
+  const key = getCacheKey(url);
+  delete cookieCache[key];
+  delete cookieTimestamps[key];
+
+  _log(`[request] Checking if FlareSolverr is up...`);
   const isRunning = await isFlareSolverrRunning();
-  if (isRunning) {
-    _log(`CF challenge on ${url} — solving with FlareSolverr...`);
-    try {
-      const urlObj = new URL(url);
-      const solveUrl = `${urlObj.protocol}//${urlObj.hostname}`;
-      await solveCloudflare(solveUrl);
-      _log('CF bypass succeeded, retrying...');
-      return await httpRequest(url, options);
-    } catch (e) {
-      _log(`FlareSolverr bypass failed: ${e.message}`);
-    }
+  if (!isRunning) {
+    _log(`[request] FlareSolverr not running — cannot bypass CF for ${url}`);
+    throw new Error(`CF challenge on ${url} and FlareSolverr is not running`);
   }
 
-  throw new Error(`Request failed for ${url}`);
+  _log(`[request] Solving CF for ${url} via FlareSolverr...`);
+  try {
+    const urlObj = new URL(url);
+    const solveUrl = `${urlObj.protocol}//${urlObj.hostname}`;
+    await solveCloudflare(solveUrl);
+    _log('[request] CF bypass succeeded, retrying original request...');
+    return await httpRequest(url, options);
+  } catch (e) {
+    _log(`[request] FlareSolverr bypass failed: ${e.message}`);
+    throw new Error(`CF bypass failed for ${url}: ${e.message}`);
+  }
 }
 
 // Pre-emptive solve — only animepahe.pw needed

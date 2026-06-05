@@ -15,8 +15,10 @@ let mainWindow;
 function logError(error, context = '') {
   const timestamp    = new Date().toISOString();
   const errorMessage = `[${timestamp}] ${context ? context + ': ' : ''}${error.message || error}\n${error.stack || ''}\n`;
-  const logPath      = path.join(app.getPath('userData'), 'error.log');
-  try { fs.appendFileSync(logPath, errorMessage, 'utf8'); } catch (_) {}
+  try {
+    const logPath = path.join(app.getPath('userData'), 'error.log');
+    fs.appendFileSync(logPath, errorMessage, 'utf8');
+  } catch (_) {}
   console.error(errorMessage);
   return errorMessage;
 }
@@ -62,17 +64,10 @@ function isFsRunning() {
 }
 
 async function startFlareSolverr() {
-  // 1. Check for valid cached cookies first
-  if (animepahe.hasValidCookies()) {
-    appLog('[FlareSolverr] Valid persistent cookies found. Skipping pre-emptive solve.');
-    _fsReady = true;
-    setAppStatus('ready');
-    return true;
-  }
-
   setAppStatus('starting');
 
-  // 2. Start FlareSolverr if not running
+  // Always start FlareSolverr — needed for on-demand re-solves on 403
+  // 1. Start FlareSolverr if not running
   if (!await isFsRunning()) {
     if (!fs.existsSync(FS_EXE)) {
       appLog(`[FlareSolverr] exe not found at: ${FS_EXE}`);
@@ -123,7 +118,13 @@ async function startFlareSolverr() {
   _fsReady = true;
   appLog('[FlareSolverr] Ready on :8191 ✓');
 
-  // 4. Pre-emptive solve Cloudflare
+  // 4. Pre-emptive solve — skip if we already have valid cookies
+  if (animepahe.hasValidCookies()) {
+    appLog('[FlareSolverr] Valid cached cookies found — skipping pre-emptive solve.');
+    setAppStatus('ready');
+    return true;
+  }
+
   setAppStatus('solving');
   try {
     await animepahe.preEmptiveSolve();
