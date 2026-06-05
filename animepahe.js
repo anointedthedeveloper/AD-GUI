@@ -22,7 +22,7 @@ let cookieTimestamps = {};
 const COOKIE_TTL = 604800; // 7 days
 
 // FlareSolverr URL
-const FLARESOLVERR_URL = 'http://localhost:8191/v1';
+const FLARESOLVERR_URL = 'http://127.0.0.1:8191/v1';
 
 let _cacheFile = null;
 
@@ -163,7 +163,7 @@ function httpRequest(url, options = {}) {
 // Check if FlareSolverr is running
 function isFlareSolverrRunning() {
   return new Promise((resolve) => {
-    http.get('http://localhost:8191/', { timeout: 1000 }, (res) => {
+    http.get('http://127.0.0.1:8191/', { timeout: 1000 }, (res) => {
       resolve(true);
     }).on('error', () => {
       resolve(false);
@@ -185,6 +185,9 @@ async function solveCloudflare(url) {
   });
 
   const options = {
+    hostname: '127.0.0.1',
+    port: 8191,
+    path: '/v1',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
