@@ -207,9 +207,9 @@ async function solveCloudflare(url) {
     maxTimeout: 180000
   });
 
-  // Wrap in a timeout so it can't hang forever (3 min max)
+  // Wrap with a timeout slightly longer than FlareSolverr's own maxTimeout (180s)
   const fetchWithTimeout = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('FlareSolverr POST timed out after 3 minutes')), 185000);
+    const timer = setTimeout(() => reject(new Error('FlareSolverr POST timed out after 200 seconds')), 200000);
     httpRequest(FLARESOLVERR_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

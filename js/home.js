@@ -20,6 +20,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const cancelUrlBtn      = document.getElementById('cancel-url');
     const clearHistoryBtn   = document.getElementById('clear-history');
     const fsBadge           = document.getElementById('fs-badge');
+    const fsTimer            = document.getElementById('fs-timer');
+
+    let _solveStart  = null;
+    let _solveTimerInterval = null;
+
+    function startSolveTimer() {
+        _solveStart = Date.now();
+        _solveTimerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - _solveStart) / 1000);
+            const m = Math.floor(elapsed / 60);
+            const s = elapsed % 60;
+            const timeStr = m > 0 ? `${m}m ${s}s` : `${s}s`;
+            if (fsTimer) fsTimer.textContent = `Elapsed: ${timeStr} (can take up to 11 min)`;
+        }, 1000);
+    }
+
+    function stopSolveTimer() {
+        clearInterval(_solveTimerInterval);
+        _solveTimerInterval = null;
+        if (fsTimer) fsTimer.textContent = '';
+    }
 
     // ── Loader ─────────────────────────────────────────────────────────────────
     function showLoader(msg = 'Loading...') {
@@ -36,6 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
         switch (state) {
             case 'starting':
                 isAppReady = false;
+                stopSolveTimer();
                 fsBadge.textContent = '🟡 Starting CF Bypass...';
                 fsBadge.style.color = '#f59e0b';
                 searchInput.disabled = true; searchBtn.disabled = true;
@@ -43,28 +65,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 break;
             case 'solving':
                 isAppReady = false;
-                fsBadge.textContent = '🟠 Solving Cloudflare... (Takes ~1 min)';
+                startSolveTimer();
+                fsBadge.textContent = '🟠 Solving Cloudflare... (Takes up to 11 min)';
                 fsBadge.style.color = '#f97316';
                 searchInput.disabled = true; searchBtn.disabled = true;
                 urlInput.disabled = true; pasteUrlBtn.disabled = true;
                 break;
             case 'ready':
                 isAppReady = true;
+                stopSolveTimer();
                 fsBadge.textContent = '🟢 CF Bypassed (Valid 7 days)';
                 fsBadge.style.color = '#22c55e';
                 searchInput.disabled = false; searchBtn.disabled = false;
                 urlInput.disabled = false; pasteUrlBtn.disabled = false;
                 break;
             case 'error':
-                isAppReady = false; // or allow fallback? fallback may fail if CF is strict
+                isAppReady = false;
+                stopSolveTimer();
                 fsBadge.textContent = '🔴 CF Bypass Error';
                 fsBadge.style.color = '#ef4444';
                 searchInput.disabled = false; searchBtn.disabled = false;
                 urlInput.disabled = false; pasteUrlBtn.disabled = false;
                 break;
             default:
-                // default to loading
                 isAppReady = false;
+                stopSolveTimer();
                 searchInput.disabled = true; searchBtn.disabled = true;
                 urlInput.disabled = true; pasteUrlBtn.disabled = true;
                 break;

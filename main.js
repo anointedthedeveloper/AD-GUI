@@ -76,9 +76,11 @@ async function startFlareSolverr() {
     }
     appLog('[FlareSolverr] Starting bundled process...');
     try {
+      const profileDir = path.join(app.getPath('userData'), 'browser_profile');
+      if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
       _fsProc = spawn(
         FS_EXE,
-        ['--max-timeout', '180000'],
+        ['--max-timeout', '180000', '--browser-user-data-dir', profileDir],
         {
           cwd:         path.dirname(FS_EXE),
           detached:    false,
@@ -133,6 +135,7 @@ async function startFlareSolverr() {
     return true;
   } catch (e) {
     appLog(`[FlareSolverr] Pre-emptive solve failed: ${e.message}`);
+    appLog('[FlareSolverr] CF solve failed — app still usable, will retry on first request.');
     setAppStatus('error');
     return false;
   }
