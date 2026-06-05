@@ -1,0 +1,16 @@
+{
+  "name": "animedownloader",
+  "version": "1.0.0",
+  "description": "A modern anime downloader with a blue and white theme",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "keywords": ["anime", "downloader", "electron"],
+  "author": "atd",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0"
+  }
+}
