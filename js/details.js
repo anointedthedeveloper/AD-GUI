@@ -49,62 +49,91 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         try {
-            // TODO: Replace with actual API call
-            // const response = await fetch(`/api/anime/${animeId}`);
-            // animeData = await response.json();
+            // Fetch anime info from API
+            const result = await window.electron.ipcRenderer.invoke('fetch-anime-info', animeId);
             
-            // Simulate API response
-            animeData = {
-                id: animeId,
-                title: 'Anime Title',
-                episodes: 0,
-                description: 'Anime description will be loaded from API.',
-                poster: '',
-                episodeList: []
-            };
-            
-            animeTitle.textContent = animeData.title;
-            animeEpisodes.textContent = `${animeData.episodes} Episodes`;
-            animeDescription.textContent = animeData.description;
-            
-            if (animeData.poster) {
-                animePoster.innerHTML = `<img src="${animeData.poster}" alt="${animeData.title}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 12px;">`;
+            if (result.success) {
+                const info = result.data;
+                animeData = {
+                    id: info.id,
+                    title: info.title,
+                    episodes: info.episodes,
+                    description: info.description || '',
+                    poster: info.poster,
+                    session: info.session,
+                    episodeList: []
+                };
+                
+                animeTitle.textContent = animeData.title;
+                animeEpisodes.textContent = `${animeData.episodes} Episodes`;
+                animeDescription.textContent = animeData.description || 'No description available.';
+                
+                if (animeData.poster) {
+                    animePoster.src = animeData.poster;
+                }
+                
+                // Fetch episode links
+                await loadEpisodes();
+            } else {
+                alert(result.message || 'Failed to load anime details');
+                hideLoader();
             }
-            
-            loadEpisodes();
         } catch (error) {
             console.error('Failed to load anime details:', error);
             animeTitle.textContent = 'Error loading anime';
             animeEpisodes.textContent = '';
             animeDescription.textContent = 'Failed to load anime details. Please try again.';
+            hideLoader();
         }
-        
-        hideLoader();
     }
 
     // Load episodes
-    function loadEpisodes() {
-        episodesContainer.innerHTML = '';
+    async function loadEpisodes() {
+        showLoader();
         
-        if (!animeData || animeData.episodeList.length === 0) {
-            episodesContainer.innerHTML = '<p style="color: var(--gray-400); font-size: 14px; text-align: center; padding: 32px;">No episodes available</p>';
-            return;
+        try {
+            const animeUrl = `https://animepahe.pw/anime/${animeData.id}`;
+            
+            // Fetch episode links (all episodes)
+            const result = await window.electron.ipcRenderer.invoke('fetch-episode-links', animeUrl, [1, animeData.episodes]);
+            
+            if (result.success) {
+                const links = result.data;
+                
+                animeData.episodeList = links.map((link, index) => ({
+                    number: index + 1,
+                    link: link
+                }));
+                
+                episodesContainer.innerHTML = '';
+                
+                if (animeData.episodeList.length === 0) {
+                    episodesContainer.innerHTML = '<p style="color: var(--gray-400); font-size: 14px; text-align: center; padding: 32px;">No episodes available</p>';
+                } else {
+                    animeData.episodeList.forEach(episode => {
+                        const row = document.createElement('div');
+                        row.className = 'episode-row fade-in';
+                        row.innerHTML = `
+                            <span>Episode ${episode.number}</span>
+                            <button class="download-episode-btn" data-episode="${episode.number}">Download</button>
+                        `;
+                        
+                        row.querySelector('.download-episode-btn').addEventListener('click', () => {
+                            downloadEpisode(episode.number);
+                        });
+                        
+                        episodesContainer.appendChild(row);
+                    });
+                }
+            } else {
+                alert(result.message || 'Failed to load episodes');
+            }
+        } catch (error) {
+            console.error('Failed to load episodes:', error);
+            episodesContainer.innerHTML = '<p style="color: var(--error); font-size: 14px; text-align: center; padding: 32px;">Failed to load episodes. Please try again.</p>';
         }
         
-        animeData.episodeList.forEach(episode => {
-            const row = document.createElement('div');
-            row.className = 'episode-row fade-in';
-            row.innerHTML = `
-                <span>Episode ${episode.number}</span>
-                <button class="download-episode-btn" data-episode="${episode.number}">Download</button>
-            `;
-            
-            row.querySelector('.download-episode-btn').addEventListener('click', () => {
-                downloadEpisode(episode.number);
-            });
-            
-            episodesContainer.appendChild(row);
-        });
+        hideLoader();
     }
 
     // Download single episode

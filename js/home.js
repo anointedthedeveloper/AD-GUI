@@ -309,29 +309,25 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reload recent searches
         loadRecentSearches();
         
-        // TODO: Replace with actual API call
-        console.log('Searching for:', query);
-        
-        // Simulate API response
-        setTimeout(() => {
-            currentAnimeData = {
-                id: 'search-result',
-                title: query,
-                episodes: 0,
-                description: 'Anime description will be loaded from API.',
-                poster: '',
-                episodeList: []
-            };
+        try {
+            const result = await window.electron.ipcRenderer.invoke('search-anime', query);
             
-            animeTitle.textContent = currentAnimeData.title;
-            animeEpisodes.textContent = `${currentAnimeData.episodes} Episodes`;
-            animeDescription.textContent = currentAnimeData.description;
-            
-            loadEpisodes();
-            animeDetailsSection.style.display = 'block';
-            animeDetailsSection.scrollIntoView({ behavior: 'smooth' });
+            if (result.success && result.data.length > 0) {
+                // Store results in localStorage for results page
+                localStorage.setItem('searchResults', JSON.stringify(result.data));
+                localStorage.setItem('searchQuery', query);
+                
+                // Navigate to results page
+                window.location.href = `results.html?q=${encodeURIComponent(query)}`;
+            } else {
+                alert('No anime found. Please try a different search term.');
+                hideLoader();
+            }
+        } catch (error) {
+            console.error('Failed to search anime:', error);
+            alert('Failed to search anime. Please try again.');
             hideLoader();
-        }, 1000);
+        }
     }
 
     // Handle URL paste

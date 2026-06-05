@@ -42,12 +42,8 @@ document.addEventListener('DOMContentLoaded', () => {
         searchQuery.textContent = `Showing results for: ${query}`;
         
         try {
-            // TODO: Replace with actual API call
-            // const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-            // const results = await response.json();
-            
-            // Simulate API response
-            const results = []; // Will be populated from API
+            // Get results from localStorage (set by home.js)
+            const results = JSON.parse(localStorage.getItem('searchResults') || '[]');
             
             resultsGrid.innerHTML = '';
             
@@ -57,16 +53,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 results.forEach(anime => {
                     const card = document.createElement('div');
                     card.className = 'trending-card fade-in';
+                    
+                    const posterHtml = anime.poster 
+                        ? `<img src="${anime.poster}" alt="${anime.title}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 8px;">`
+                        : `<div class="placeholder-image">${anime.title.substring(0, 2).toUpperCase()}</div>`;
+                    
                     card.innerHTML = `
                         <div class="card-image">
-                            <div class="placeholder-image">${anime.initials || 'AN'}</div>
+                            ${posterHtml}
                         </div>
                         <div class="card-info">
                             <h4>${anime.title}</h4>
-                            <p>${anime.episodes} Episodes</p>
+                            <p>${anime.episodes || '?'} Episodes</p>
                         </div>
                     `;
                     card.addEventListener('click', () => {
+                        // Store anime data for details page
+                        localStorage.setItem('selectedAnime', JSON.stringify(anime));
                         window.location.href = `details.html?id=${anime.id}`;
                     });
                     resultsGrid.appendChild(card);

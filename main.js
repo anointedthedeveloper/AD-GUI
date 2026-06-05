@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const animepahe = require('./animepahe');
 
 let mainWindow;
 
@@ -368,5 +369,66 @@ ipcMain.handle('delete-file', async (event, filePath) => {
   } catch (error) {
     logError(error, 'Failed to delete file');
     return { success: false, message: 'Failed to delete file.' };
+  }
+});
+
+// AnimePahe API handlers
+ipcMain.handle('search-anime', async (event, query) => {
+  try {
+    const results = await animepahe.searchAnime(query);
+    return { success: true, data: results };
+  } catch (error) {
+    logError(error, 'Failed to search anime');
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle('fetch-anime-info', async (event, animeId) => {
+  try {
+    const info = await animepahe.fetchAnimeInfo(animeId);
+    return { success: true, data: info };
+  } catch (error) {
+    logError(error, 'Failed to fetch anime info');
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle('fetch-anime-metadata', async (event, url, isSeries) => {
+  try {
+    const metadata = await animepahe.fetchMetadata(url, isSeries);
+    return { success: true, data: metadata };
+  } catch (error) {
+    logError(error, 'Failed to fetch anime metadata');
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle('fetch-episode-links', async (event, url, epRange) => {
+  try {
+    const links = await animepahe.fetchSeriesEpisodeLinks(url, epRange);
+    return { success: true, data: links };
+  } catch (error) {
+    logError(error, 'Failed to fetch episode links');
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle('fetch-download-links', async (event, playUrl, targetRes, audioLang) => {
+  try {
+    const links = await animepahe.fetchPaheWinLinks(playUrl, targetRes, audioLang);
+    return { success: true, data: links };
+  } catch (error) {
+    logError(error, 'Failed to fetch download links');
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle('check-flaresolverr', async () => {
+  try {
+    const isRunning = await animepahe.isFlareSolverrRunning();
+    return { success: true, isRunning };
+  } catch (error) {
+    logError(error, 'Failed to check FlareSolverr');
+    return { success: false, isRunning: false };
   }
 });
